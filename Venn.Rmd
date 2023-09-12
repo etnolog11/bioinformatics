@@ -1,0 +1,329 @@
+---
+title: "Venn"
+output: html_document
+date: "2023-07-26"
+---
+
+```{r library}
+library(data.table)
+library(ggplot2)
+library(ggupset)
+library(ggimage)
+library(DESeq2)
+library(apeglm)
+library(GenomicRanges)
+library(ChIPseeker)
+library(org.Mm.eg.db)
+library(EnsDb.Mmusculus.v79)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(VennDiagram)
+library(clusterProfiler)
+library(dplyr)
+```
+```{r functions}
+
+#takes a data frame with 2 samples for each time mode, adds significance, p value and logfold to table returns the data frame with only significant changes with abs(logfoldchange)>1 that are identified 
+add_sig=function(N1,abs=T)
+{
+p<-c()
+delta<-c()
+logfold<-c()
+for(i in 1:nrow(N1)){
+  mu_0<-mean(c(N1$"0h1"[i],N1$"0h2"[i]))
+  mu_6<-mean(c(N1$"6h1"[i],N1$"6h2"[i]))
+  sd_0<-sd(c(N1$"0h1"[i],N1$"0h2"[i]))
+  sd_6<-sd(c(N1$"6h1"[i],N1$"6h2"[i]))
+  if(sd_0==0|sd_6==0)
+  {p[i] <- NA
+    delta[i] <- NA}
+  else{
+    Foldchange <- log((mu_6+1)/(mu_0+1),base=2)
+    new_sd <- sqrt(sd_6**2+sd_0**2)
+    dif<-mu_6-mu_0
+    p[i] <- pnorm(q = 0, mean = abs(dif), sd = new_sd)
+    logfold[i] <- Foldchange}
+  
+}
+sigtype<-ifelse(p<=0.05/length(p),"Sig","NotSig")
+N1$type=sigtype
+if(abs){N1$logfold=abs(logfold)}
+else{N1$logfold=logfold}
+N1$p=p
+copyN=N1
+not_good=is.na(N1$type)|abs(N1$logfold)<1|N1$type=="NotSig"
+copyN=copyN[which(!not_good),-(4:7)]
+return(copyN)}
+#takes two dataframes with genomic informations outputs the Venn Diagramm of them
+draw=function(Csi, Nsi){
+  atac_C_gr<-GRanges(Csi[,1:3])
+  atac_N_gr<-GRanges(Nsi[,1:3])
+common_peaks<-intersect(atac_C_gr,atac_N_gr)
+middle_ven=length(common_peaks)
+grid.newpage()
+draw.pairwise.venn(area1=length(atac_C_gr),cross.area = middle_ven,area2=length(atac_N_gr),category = c("C-term","N-term"),fill=c("magenta","skyblue"))}
+
+anno=function(atac)
+{
+  #takes a Grange object and outputs annotated data frame out of it
+  peakAnno <- annotatePeak(atac, tssRegion=c(-3000, 3000),
+                         TxDb=TxDb.Mmusculus.UCSC.mm10.knownGene,annoDb = 'org.Mm.eg.db')
+  #df11=data.frame(peakAnno)
+  df11=peakAnno
+  return(df11)}
+```
+
+```{r main}
+C=fread('EBF1-dTAG_C_ATAC_counts.mat',header=T)
+N=fread("EBF1-dTAG_N_ATAC_counts.mat",header=T)
+rna=as.matrix(read.csv("EBF1-dTAG_N_exon_counts.tsv",sep="\t",row.names="Geneid"))
+coldata=data.frame(matrix(nrow=8, ncol = 1))
+coldata[1:4,]="0h"
+coldata[5:8,]="6h"
+colnames(coldata)="h"
+rownames(coldata)=c("EBF1.dTAG_N_0h_rep1","EBF1.dTAG_N_0h_rep2","EBF1.dTAG_N_0h_rep3","EBF1.dTAG_N_0h_rep4","EBF1.dTAG_N_6h_rep1","EBF1.dTAG_N_6h_rep2","EBF1.dTAG_N_6h_rep3","EBF1.dTAG_N_6h_rep4")
+colnames(C)<-c("chr","start","end","0h1","0h2","6h1","6h2")
+colnames(N)<-c("chr","start","end","0h1","0h2","6h1","6h2")
+ Nsig= add_sig(N)
+ Csig= add_sig(C)
+ draw(Csig, Nsig)
+ Csig$chr=paste0("chr",Csig$chr)
+ Nsig$chr=paste0("chr",Nsig$chr)
+ atac_C_gr<-GRanges(Csig[,1:3])
+ atac_N_gr<-GRanges(Nsig[,1:3])
+dfC=anno(atac_C_gr)
+dfN=anno(atac_N_gr)
+a=ggplot(data=dfC@annoStat,aes(Feature,Frequency))+
+  geom_bar(stat = "identity",color="blue",fill=rgb(0.1,0.4,0.5,0.7,0.8,0.9))+ theme(axis.text.x = element_text(angle = -45, hjust=0))
+dds <- DESeqDataSetFromMatrix(countData = rna,
+                              colData = coldata,
+                              design = ~ h)
+dds <- DESeq(dds)
+res <- results(dds)
+res <- lfcShrink(dds, coef=2, type="apeglm",format = "DataFrame")
+res=as.data.frame(res)
+res=res[-which(res$baseMean==0),]
+a
+
+```
+
+
+```{r compare DESeq2}
+#read rna seq, calculate the significance, filter not needed values,plots violin plot 
+
+rna=as.matrix(read.csv("EBF1-dTAG_N_exon_counts.tsv",sep="\t",row.names="Geneid"))
+w=which(rowSums(rna[,1:8])<10 )
+rna=rna[-w,]
+mean0h = rowMeans(rna[,1:4])
+mean6h = rowMeans(rna[,5:8])
+sd0h = rowSds(rna[,1:4])
+sd6h = rowSds(rna[,5:8])
+p=c()
+delta=c()
+new_sd <- sqrt(sd6h**2+sd0h**2)
+    dif<-mean6h-mean0h
+    p <- pnorm(q = 0, mean = abs(dif), sd = new_sd)
+sigtype<-ifelse(p<=0.05/length(p),"Sig","NotSig")
+logfoldchange = log((mean0h+1)/(mean6h+1),base = 2)
+logfoldchange= as.data.frame(logfoldchange)
+logfoldchange$sig=sigtype
+g <- ggplot( logfoldchange, aes( y = logfoldchange, x= sig,group = sig, fill = sig)) + 
+  geom_violin() + 
+  theme_bw() + 
+  theme(legend.position="none")
+plot(g)
+```
+```{r}
+#read rna seq, calculate the significance, filter not needed values,plots violin plot 
+rna=as.matrix(read.csv("EBF1-dTAG_N_exon_counts.tsv",sep="\t",row.names="Geneid"))
+rna1=as.matrix(read.csv("EBF1-dTAG_N_exon_counts.tsv",sep="\t",row.names="Geneid"))
+coldata=data.frame(matrix(nrow=8, ncol = 1))
+coldata[1:4,]="0h"
+coldata[5:8,]="6h"
+colnames(coldata)="h"
+rownames(coldata)=c("EBF1.dTAG_N_0h_rep1","EBF1.dTAG_N_0h_rep2","EBF1.dTAG_N_0h_rep3","EBF1.dTAG_N_0h_rep4","EBF1.dTAG_N_6h_rep1","EBF1.dTAG_N_6h_rep2","EBF1.dTAG_N_6h_rep3","EBF1.dTAG_N_6h_rep4")
+dds <- DESeqDataSetFromMatrix(countData = rna1,
+                              colData = coldata,
+                              design = ~ h)
+dds <- DESeq(dds)
+resu=as.data.frame(results(dds))
+nas=which(is.na(resu$log2FoldChange))
+resu=resu[-nas,]
+sig<-ifelse(resu$pvalue<=0.05/length(resu$pvalue),"Sig","NotSig")
+resu$sig=sig
+resu=resu[,-c(1,3,4,5,6)]
+
+colnames(resu)=c("logfoldchange","sig")
+resu$type="DEseq2"
+w=which(rowSums(rna[,1:8])<1 )
+rna=rna[-w,]
+mean0h = rowMeans(rna[,1:4])
+mean6h = rowMeans(rna[,5:8])
+sd0h = rowSds(rna[,1:4])
+sd6h = rowSds(rna[,5:8])
+p=c()
+delta=c()
+new_sd <- sqrt(sd6h**2+sd0h**2)
+    dif<-mean6h-mean0h
+    p <- pnorm(q = 0, mean = abs(dif), sd = new_sd)
+sigtype<-ifelse(p<=0.05/length(p),"Sig","NotSig")
+logfoldchange = log((mean0h+1)/(mean6h+1),base = 2)
+logfoldchange= as.data.frame(logfoldchange)
+logfoldchange$sig=sigtype
+logfoldchange$type="Dif_of_means"
+ever=rbind(logfoldchange,resu)
+colnames(ever)=c( "logfoldchange", "Significance" ,"type")
+g <- ggplot( ever, aes( y = logfoldchange, x= type, fill = Significance)) + 
+  geom_violin() + 
+  theme_bw() 
+plot(g)
+
+```
+
+
+```{r GO}
+Rna=as.matrix(read.csv("EBF1-dTAG_N_exon_counts.tsv",sep="\t",row.names="Geneid"))
+w=which(rowSums(Rna[,1:8])<10 )
+Rna=Rna[-w,]
+mean0h = rowMeans(Rna[,1:4])
+mean6h = rowMeans(Rna[,5:8])
+sd0h = rowSds(Rna[,1:4])
+sd6h = rowSds(Rna[,5:8])
+p=c()
+delta=c()
+new_sd <- sqrt(sd6h**2+sd0h**2)
+    dif<-mean6h-mean0h
+    p <- pnorm(q = 0, mean = abs(dif), sd = new_sd)
+sigtype<-ifelse(p<=0.05/length(p),"Sig","NotSig")
+logfoldchange = log((mean0h+1)/(mean6h+1),base = 2)
+logfoldchange= as.data.frame(logfoldchange)
+logfoldchange$sig=sigtype
+logfoldchange$type="Dif_of_means"
+logfoldchange1=logfoldchange
+logfoldchange1$a= rownames(logfoldchange)
+tea= sapply(logfoldchange1$a,function(x){strsplit(x,split="[.]")[[1]]})[1,]
+
+ego <- enrichGO(gene          = tea,
+                OrgDb         = org.Mm.eg.db,
+                ont           = "MF",
+                keyType = "ENSEMBL",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+        readable      = TRUE)
+a=dotplot(ego,title = "Every change",font.size = 10)
+#ggsave(plot=a,"Figure3.png")
+```
+```{r main}
+#Peak annotation
+C=fread('EBF1-dTAG_C_ATAC_counts.mat',header=T)
+N=fread("EBF1-dTAG_N_ATAC_counts.mat",header=T)
+colnames(C)<-c("chr","start","end","0h1","0h2","6h1","6h2")
+colnames(N)<-c("chr","start","end","0h1","0h2","6h1","6h2")
+ Nsig= add_sig(N)
+ Csig= add_sig(C)
+ Csig$chr=paste0("chr",Csig$chr)
+ Nsig$chr=paste0("chr",Nsig$chr)
+ Nsig$terminus="N"
+ Csig$terminus="C"
+ all=rbind(Nsig,Csig)
+ all_gr<-GRanges(all[,1:3])
+dfC=anno(all_gr)
+a=ggplot(data=dfC@annoStat,aes(Feature,Frequency))+
+  geom_bar(stat = "identity",color="blue")+ theme(axis.text.x = element_text(angle = -45, hjust=0))
+a
+
+```
+
+```{r}
+ChIP=fread("EBF1_Soren_proB_all_300bp_mm10_names.bed")
+colnames(ChIP)=c("chr","start","end", "readnumber")
+C=fread('EBF1-dTAG_C_ATAC_counts.mat',header=T)
+N=fread("EBF1-dTAG_N_ATAC_counts.mat",header=T)
+colnames(C)<-c("chr","start","end","0h1","0h2","6h1","6h2")
+colnames(N)<-c("chr","start","end","0h1","0h2","6h1","6h2")
+N$terminus="N"
+C$terminus="C"
+All=rbind(C,N)
+All=add_sig(All,F)
+All_d=All
+All=All[which(All$type=="Sig"|All$logfold>=1)]
+All_d=All_d[which(All_d$type=="Sig"|All_d$logfold<1)]
+ChIP_G=GRanges(ChIP[,1:3])
+ATAC_gr=GRanges(All[,1:3])
+ATAC_gr_d=GRanges(All_d[,1:3])
+ChIP_G_d=ChIP_G
+res_d=findOverlaps(query = ChIP_G_d,subject = ATAC_gr_d)
+res=findOverlaps(query = ChIP_G,subject = ATAC_gr)
+new_CHIP=as.data.frame(ChIP_G[res@from,])
+new_ATAC=as.data.frame(ATAC_gr[res@to,])
+new_CHIP_d=as.data.frame(ChIP_G_d[res@from,])
+new_ATAC_d=as.data.frame(ATAC_gr_d[res@to,])
+Ever_d= cbind(new_ATAC_d,new_CHIP_d)
+Ever= cbind(new_ATAC,new_CHIP)
+new_CHIP_d=new_CHIP_d[,-5]
+new_CHIP=new_CHIP[,-5]
+new_CHIP_d$seqnames=paste0("chr",new_CHIP_d$seqnames)
+new_CHIP$seqnames=paste0("chr",new_CHIP$seqnames)
+df_d=as.data.frame(anno(GRanges(new_CHIP_d)))$ENSEMBL
+df=as.data.frame(anno(GRanges(new_CHIP)))$ENSEMBL
+ego <- enrichGO(gene          = df,
+                OrgDb         = org.Mm.eg.db,
+                ont           = "MF",
+                keyType = "ENSEMBL",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+        readable      = TRUE)
+dotplot(ego,title = "Up regulated",font.size = 10)
+ego_d <- enrichGO(gene          = df_d,
+                OrgDb         = org.Mm.eg.db,
+                ont           = "MF",
+                keyType = "ENSEMBL",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+        readable      = TRUE)
+a=dotplot(ego_d,title = "Significant changes",font.size = 10)
+ggsave(plot=a,"Figure4.png")
+```
+
+```{r}
+C=fread('EBF1-dTAG_C_ATAC_counts.mat',header=T)
+N=fread("EBF1-dTAG_N_ATAC_counts.mat",header=T)
+ChIP=fread("EBF1_Soren_proB_all_300bp_mm10_names.bed")[,1:3]
+colnames(ChIP)=c("chr","start","end")
+ChIP=GRanges(ChIP)
+
+colnames(C)<-c("chr","start","end","0h1","0h2","6h1","6h2")
+colnames(N)<-c("chr","start","end","0h1","0h2","6h1","6h2")
+N$terminus="N"
+C$terminus="C"
+All=rbind(C,N)
+All_gran=GRanges(All)
+coldata=data.frame(matrix(nrow=4, ncol = 1))
+coldata[1:2,]="0h"
+coldata[3:4,]="6h"
+colnames(coldata)="h"
+rownames(coldata)=c("0h1","0h2","6h1","6h2")
+dds <- DESeqDataSetFromMatrix(countData = All[,4:7],
+                              colData = coldata,
+                              design = ~ h)
+dds <- DESeq(dds)
+res=as.data.frame(results(dds))[,c(2,6)]
+All=cbind(All,res)
+atac_gr=GRanges(All)
+overlap=findOverlaps(atac_gr,ChIP)
+over_df=data.frame(atac_gr[overlap@from])
+atac_df=as.data.frame(All)
+atac_df=left_join(atac_df,over_df)
+atac_df=atac_df[,1:11]
+atac_df$seqnames= ifelse(!is.na(atac_df$seqnames),(T),(F))
+atac_df=add_sig(atac_df,F)
+colnames(atac_df)=c("chr" , "start" , "end","terminus", "log2FoldChange","padj","Overlap","type","logfold","p")
+g <- ggplot( atac_df, aes(  x= log2FoldChange, y = -log10(padj) ,color = Overlap,shape=padj<0.05)) + 
+  geom_point() + 
+  theme_bw() +labs(title ="Scatter plot of ATACseq data",x="log2foldchange")
+plot(g)
+ggsave("Figure1.png",plot=g)
+```
+
